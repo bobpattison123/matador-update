@@ -1,24 +1,22 @@
 import json
 import os
 import numpy as np
-from math import ceil 
+from math import ceil
 from math import log
 import math
-from utils.train import prep_data, checkconfig
-from utils.tmu.models.classification.vanilla_classifier import TMClassifier
-from utils.tmu.models.classification.coalesced_classifier import TMCoalescedClassifier
-from utils.tmu.tools import BenchmarkTimer
 # from utils.rtl import coalesced_tm_write_hard_coded_blocks, coalesced_tm_hard_coded_blocks_top
+
 
 def write_testbench(tb_file, AXI_data_width, number_of_blocks):
     # testing for 10 data points
-	with open(tb_file, "w") as f:
-		print("module axis_stream_tb();", file=f)
-		print("\t\tparameter C_S00_AXIS_DATA_WIDTH = %d;"% AXI_data_width, file=f)
-		print("\t\tparameter C_M00_AXIS_DATA_WIDTH = %d;"% AXI_data_width, file=f)
-		print("\t\tparameter NUM_PACKETS = %d;"% int(number_of_blocks), file=f)
-		print("\t\tparameter DATAPOINTS = %d;" % 10, file=f)
-		print("""
+    with open(tb_file, "w") as f:
+        print("module axis_stream_tb();", file=f)
+        print("\t\tparameter C_S00_AXIS_DATA_WIDTH = %d;" % AXI_data_width, file=f)
+        print("\t\tparameter C_M00_AXIS_DATA_WIDTH = %d;" % AXI_data_width, file=f)
+        print("\t\tparameter NUM_PACKETS = %d;" % int(number_of_blocks), file=f)
+        print("\t\tparameter DATAPOINTS = %d;" % 10, file=f)
+        print(
+            """
 
     reg clock;
     reg areset;
@@ -126,100 +124,120 @@ def write_testbench(tb_file, AXI_data_width, number_of_blocks):
 
 endmodule
 	
-	""", file=f)
-          
+	""",
+            file=f,
+        )
+
 
 def pack_data(test_data, output_dir, AXI_data_width):
+    mnist_file = test_data
+    File_data = np.loadtxt(mnist_file, dtype=int)
+    number_of_examples = 10
+    # Remove the class cols
+    cols = File_data[:, -1]
 
-	mnist_file = test_data
-	File_data = np.loadtxt(mnist_file, dtype=int)
-	number_of_examples = 10
-	# Remove the class cols 
-	cols = File_data[:, -1]
+    f = open(output_dir + "/RTL/expected_answers.txt", "w")
+    for i in range(number_of_examples):
+        f.write(str(cols[i]) + "\n")
+    f.close()
 
-	f = open(output_dir + "/RTL/expected_answers.txt", "w")
-	for i in range(number_of_examples):
-		f.write(str(cols[i])+"\n")
-	f.close()
+    File_data = File_data[:, :-1]
+    AXI_bus_size = AXI_data_width
 
-	File_data = File_data[:, :-1]
-	AXI_bus_size =  AXI_data_width
+    print("	[RTL_gen][d] Number of features:\t\t", File_data[0].shape[0])
+    print("	[RTL_gen][d] Packets:\t\t\t", File_data[0].shape[0] / AXI_bus_size)
+    print(
+        "	[RTL_gen][d] Number of Extra packet(s):\t",
+        math.ceil(File_data[0].shape[0] / AXI_bus_size)
+        - math.floor(File_data[0].shape[0] / AXI_bus_size),
+    )
+    print(
+        "	[RTL_gen][d] Number of packets required:\t",
+        math.ceil(File_data[0].shape[0] / AXI_bus_size),
+    )
 
-	print("	[RTL_gen][d] Number of features:\t\t", File_data[0].shape[0])
-	print("	[RTL_gen][d] Packets:\t\t\t", File_data[0].shape[0]/AXI_bus_size)
-	print("	[RTL_gen][d] Number of Extra packet(s):\t", math.ceil(File_data[0].shape[0]/AXI_bus_size) - math.floor(File_data[0].shape[0]/AXI_bus_size))
-	print("	[RTL_gen][d] Number of packets required:\t", math.ceil(File_data[0].shape[0]/AXI_bus_size))
+    mnist_packets = []
+    packet_32 = []
+    packet_counter = 0
 
-	mnist_packets = []
-	packet_32 = []
-	packet_counter = 0 
+    for j in range(number_of_examples):
+        for i in range(File_data[j].shape[0]):
+            if packet_counter <= AXI_bus_size - 1:
+                packet_32.append(File_data[j][i])
+            else:
+                mnist_packets.append(packet_32)
+                packet_32 = []
+                # print(i)
+                packet_counter = 0
+                packet_32.append(File_data[j][i])
 
-	for j in range(number_of_examples):
-		for i in range(File_data[j].shape[0]):
-			if packet_counter <= AXI_bus_size-1: 
-				packet_32.append(File_data[j][i])
-			else: 
-				mnist_packets.append(packet_32)
-				packet_32 = []
-				# print(i)
-				packet_counter = 0
-				packet_32.append(File_data[j][i])
+            packet_counter += 1
 
-			packet_counter += 1
+        # If datapoint is complete and packet is not fully filled...
+        # Fill the remainder with zeros
+        if len(packet_32) != 0:
+            # print("Half filled packet: ", len(packet_32))
+            remainder_zero_fill = AXI_bus_size - len(packet_32)
+            for l in range(remainder_zero_fill):
+                packet_32.append(0)
 
-		# If datapoint is complete and packet is not fully filled...
-		# Fill the remainder with zeros 
-		if(len(packet_32) != 0):
-			# print("Half filled packet: ", len(packet_32))
-			remainder_zero_fill = AXI_bus_size -len(packet_32)   
-			for l in range(remainder_zero_fill):
-				packet_32.append(0)
-			
-			mnist_packets.append(packet_32)
-			packet_counter = 0
-			packet_32 = []
-	# convert the list of lists to a numpy array 
-	mnist_packets_np_1 = np.array(mnist_packets)
-	mnist_packets_np  = np.fliplr(mnist_packets_np_1)
-	# print(mnist_packets_np)
-	# now convert each 32 number array to its equivalent binary 
-	# this will be the 32 bit packet sent each time 
-	mnist_packets_np_bits =np.packbits(mnist_packets_np_1, axis=-1,  bitorder='little')
-	if(AXI_bus_size > 64):
-		print("	[RTL_gen]	Bus size is greater than maximum")
-	else:	
-		mnist_packets_np_bits.dtype = np.uint64
-	# print(mnist_packets_np_bits)
-	# now the mnist data is in 32 bit packets -- we can write the testbench 
-	
-	tb_file_test = output_dir + "/RTL/test_data_copy_paste_examples.mem"
-	f = open(tb_file_test, "w")
+            mnist_packets.append(packet_32)
+            packet_counter = 0
+            packet_32 = []
+    # convert the list of lists to a numpy array
+    mnist_packets_np_1 = np.array(mnist_packets)
+    mnist_packets_np = np.fliplr(mnist_packets_np_1)
+    # print(mnist_packets_np)
+    # now convert each 32 number array to its equivalent binary
+    # this will be the 32 bit packet sent each time
+    mnist_packets_np_bits = np.packbits(mnist_packets_np_1, axis=-1, bitorder="little")
+    if AXI_bus_size > 64:
+        print("	[RTL_gen]	Bus size is greater than maximum")
+    else:
+        mnist_packets_np_bits.dtype = np.uint64
+    # print(mnist_packets_np_bits)
+    # now the mnist data is in 32 bit packets -- we can write the testbench
 
-	for i in range(mnist_packets_np.shape[0]):
-		# if i %13 == 0:
-			# print("------")
-		# print(mnist_packets_np_bits[i])
-		print(''.join(map(str, mnist_packets_np[i])), file=f)
+    tb_file_test = output_dir + "/RTL/test_data_copy_paste_examples.mem"
+    f = open(tb_file_test, "w")
+
+    for i in range(mnist_packets_np.shape[0]):
+        # if i %13 == 0:
+        # print("------")
+        # print(mnist_packets_np_bits[i])
+        print("".join(map(str, mnist_packets_np[i])), file=f)
+
 
 def to_bin(val, bits):
-    s = bin(val & int("1"*bits, 2))[2:]
+    s = bin(val & int("1" * bits, 2))[2:]
     return ("{0:0>%s}" % (bits)).format(s)
 
-def write_weights(filename, weights, bits_required, classes, clauses): 
-	weights = np.transpose(weights)
-	print(weights.shape)
-	with open(filename, "w") as f: 
-		# top level module for feeding in the weights and class_sums per class
-		print("module hard_coded_weight #(", file=f)
-		print("\tparameter CLAUSE_NUM", file=f)
-		print("\t)", file=f)
-		print("\t(", file=f)
-		print("\toutput logic signed [%d:0] weights [%d][CLAUSE_NUM]); " %(bits_required-1, classes), file=f)
-		print("", file=f)
-		for i in range(classes):
-			for j in range(clauses):
-				# print("weight:", i, j,  weights[i][j])
-				print("\tassign weights[%d][%d] \t=\t%d'b%s;" %(i, j, bits_required,to_bin(weights[i][j], bits_required)), file=f)
+
+def write_weights(filename, weights, bits_required, classes, clauses):
+    weights = np.transpose(weights)
+    print(weights.shape)
+    with open(filename, "w") as f:
+        # top level module for feeding in the weights and class_sums per class
+        print("module hard_coded_weight #(", file=f)
+        print("\tparameter CLAUSE_NUM", file=f)
+        print("\t)", file=f)
+        print("\t(", file=f)
+        print(
+            "\toutput logic signed [%d:0] weights [%d][CLAUSE_NUM]); "
+            % (bits_required - 1, classes),
+            file=f,
+        )
+        print("", file=f)
+        for i in range(classes):
+            for j in range(clauses):
+                # print("weight:", i, j,  weights[i][j])
+                print(
+                    "\tassign weights[%d][%d] \t=\t%d'b%s;"
+                    % (i, j, bits_required, to_bin(weights[i][j], bits_required)),
+                    file=f,
+                )
+        print("endmodule", file=f)
+
 
 def get_bits_required(Weights_file, classes, clauses):
     Weights = []
@@ -231,71 +249,88 @@ def get_bits_required(Weights_file, classes, clauses):
     Weights = np.reshape(Weights, (classes, clauses))
     print(Weights.shape)
 
-    max_positive = 0 
-    max_negative = 0 
-    max_positive_current = 0 
-    max_negative_current = 0  
+    max_positive = 0
+    max_negative = 0
+    max_positive_current = 0
+    max_negative_current = 0
 
     for i in range(Weights.shape[0]):
         # classes
         for j in range(Weights.shape[1]):
-            #clauses
-            if Weights[i][j] > 0: 
+            # clauses
+            if Weights[i][j] > 0:
                 max_positive_current += Weights[i][j]
             else:
                 max_negative_current += Weights[i][j]
 
-        if max_positive_current > max_positive: 
+        if max_positive_current > max_positive:
             max_positive = max_positive_current
 
-        if max_negative_current < max_negative: 
+        if max_negative_current < max_negative:
             max_negative = max_negative_current
 
-        max_negative_current = 0 
-        max_positive_current = 0 
+        max_negative_current = 0
+        max_positive_current = 0
 
-    print("Max Positive Weight: " , max_positive)
+    print("Max Positive Weight: ", max_positive)
     print("Max Negative Weight: ", max_negative)
 
     max_pos = abs(max_positive)
-    max_neg = abs(max_negative) 
+    max_neg = abs(max_negative)
 
-    bits = 0 
+    bits = 0
 
-    if max_pos > max_neg: 
+    if max_pos > max_neg:
         abs_w = max_pos
         bits = ceil(log(abs_w, 2))
-    else: 
-        abs_w = max_neg 
+    else:
+        abs_w = max_neg
         bits = ceil(log(abs_w, 2)) + 1
 
-    print("bits required: ",  bits)
+    print("bits required: ", bits)
     return bits, Weights
 
-def coalesced_tm_write_axis_wrapper(axis_wrapper_f, AXI_data_width, number_of_blocks, adder_stages, clauses, classes, features):
-	with open(axis_wrapper_f, "w") as f:
-		print("module axis_wrapper_top #", file=f)
-		print("\t(", file=f)
-		print("\t\tparameter integer DEPTH = 1,", file=f)
-		print("\t\tparameter integer WIDTH = 1,", file=f)
-		print("\t\tparameter integer PACKETS = %d," %(number_of_blocks), file=f)
-		print("\t\tparameter integer C_S00_AXIS_TDATA_WIDTH = %d," %(AXI_data_width), file=f)
-		print("\t\tparameter integer C_M00_AXIS_TDATA_WIDTH = %d," %(AXI_data_width), file=f)
-		print("\t\t// design configurations", file=f)
-		print("\t\tparameter STAGE_NUM = %d," %(adder_stages), file=f)
-		print("\t\tparameter CLAUSE_NUM = %d," %(clauses), file=f)
-		print("\t\tparameter CLASS_NUM = %d," %(classes), file=f)
-		# in this clase the weight length is not so useful - its not for the weights themselves
-		# this is used as how many bits to represent the class sum 
-		bits_required = int(ceil(log(clauses, 2)) + 1)
-		print("\t\tparameter WEIGHT_LENGTH = %d," %(bits_required), file=f)
-		print("\t\tparameter FEATURE_NUM = %d," %(features), file=f)
-		print("\t\tparameter PACKETS_NUM = (FEATURE_NUM - 1)/C_S00_AXIS_TDATA_WIDTH + 1,", file=f)
-		print("\t\tparameter VANILLA = 0,", file=f)
-		print("\t\tparameter COALESCED = 1", file=f)
-		print("\t)", file=f)
-		print("\t(", file=f)
-		print("""
+
+def coalesced_tm_write_axis_wrapper(
+    axis_wrapper_f,
+    AXI_data_width,
+    number_of_blocks,
+    adder_stages,
+    bits_required,
+    clauses,
+    classes,
+    features,
+):
+    with open(axis_wrapper_f, "w") as f:
+        print("module axis_wrapper_top #", file=f)
+        print("\t(", file=f)
+        print("\t\tparameter integer DEPTH = 1,", file=f)
+        print("\t\tparameter integer WIDTH = 1,", file=f)
+        print("\t\tparameter integer PACKETS = %d," % (number_of_blocks), file=f)
+        print(
+            "\t\tparameter integer C_S00_AXIS_TDATA_WIDTH = %d," % (AXI_data_width),
+            file=f,
+        )
+        print(
+            "\t\tparameter integer C_M00_AXIS_TDATA_WIDTH = %d," % (AXI_data_width),
+            file=f,
+        )
+        print("\t\t// design configurations", file=f)
+        print("\t\tparameter STAGE_NUM = %d," % (adder_stages), file=f)
+        print("\t\tparameter CLAUSE_NUM = %d," % (clauses), file=f)
+        print("\t\tparameter CLASS_NUM = %d," % (classes), file=f)
+        print("\t\tparameter WEIGHT_LENGTH = %d," % (bits_required), file=f)
+        print("\t\tparameter FEATURE_NUM = %d," % (features), file=f)
+        print(
+            "\t\tparameter PACKETS_NUM = (FEATURE_NUM - 1)/C_S00_AXIS_TDATA_WIDTH + 1,",
+            file=f,
+        )
+        print("\t\tparameter VANILLA = 0,", file=f)
+        print("\t\tparameter COALESCED = 1", file=f)
+        print("\t)", file=f)
+        print("\t(", file=f)
+        print(
+            """
 
 		// Ports of Axi Slave Bus Interface S00_AXIS
 		input  wire    s00_axis_aclk,
@@ -440,15 +475,18 @@ def coalesced_tm_write_axis_wrapper(axis_wrapper_f, AXI_data_width, number_of_bl
 	
 endmodule
 
-""", file=f)
+""",
+            file=f,
+        )
 
 
 def coalesced_tm_write_top(filename, number_of_blocks, AXI_data_width, clauses):
-	with open(filename, "w") as f:
-		print("`timescale 1ns / 1ps", file=f)
-		print("", file=f)
-		print("module Hard_Coded_Inference_Top #(", file=f)
-		print("""
+    with open(filename, "w") as f:
+        print("`timescale 1ns / 1ps", file=f)
+        print("", file=f)
+        print("module Hard_Coded_Inference_Top #(", file=f)
+        print(
+            """
 		parameter STAGE_NUM,
 	parameter CLAUSE_NUM,
 	parameter CLASS_NUM,
@@ -477,81 +515,86 @@ clauses, class_sums, m00_axis_tready, m00_axis_tkeep);
 	input logic [C_M00_AXIS_TDATA_WIDTH-1:0] packet_counter;
 	output logic [C_M00_AXIS_TDATA_WIDTH-1:0] y;
 		
-		""", file=f)
-		# OLD VERISON ----------------------------
-		# print("\tparameter STAGE_NUM,", file=f)
-		# print("\tparameter CLAUSE_NUM,", file=f)
-		# print("\tparameter CLASS_NUM,", file=f)
-		# print("\tparameter WEIGHT_LENGTH,", file=f)
-		# print("\tparameter C_S00_AXIS_TDATA_WIDTH,", file=f)
-		# print("\tparameter C_M00_AXIS_TDATA_WIDTH,", file=f)
-		# print("\tparameter PACKETS_NUM", file=f)
-		# print(")", file=f)
+		""",
+            file=f,
+        )
+        # OLD VERISON ----------------------------
+        # print("\tparameter STAGE_NUM,", file=f)
+        # print("\tparameter CLAUSE_NUM,", file=f)
+        # print("\tparameter CLASS_NUM,", file=f)
+        # print("\tparameter WEIGHT_LENGTH,", file=f)
+        # print("\tparameter C_S00_AXIS_TDATA_WIDTH,", file=f)
+        # print("\tparameter C_M00_AXIS_TDATA_WIDTH,", file=f)
+        # print("\tparameter PACKETS_NUM", file=f)
+        # print(")", file=f)
 
-		# print("(x, y, packet_counter, valid, s_axis_tready, clk, rst, finish, last, last_out,", file=f)
-		# print("clauses, class_sums, m00_axis_tready, m00_axis_tkeep);", file=f)
-		# print("\tinput logic clk;", file=f)
-		# print("\tinput logic rst;", file=f)
-		# print("\toutput logic finish;", file=f)
-		# print("\toutput logic [CLAUSE_NUM - 1:0] clauses [CLASS_NUM - 1:0];", file=f)
-		# print("\toutput logic signed [WEIGHT_LENGTH - 1:0] class_sums [%d];" %(classes), file=f)
-		# print("\tinput logic s_axis_tready;", file=f)
-		# print("\tinput logic m00_axis_tready;", file=f)
-		# print("\toutput logic [(C_M00_AXIS_TDATA_WIDTH/8)-1 : 0] m00_axis_tkeep;")
-		# print("\tinput logic [C_M00_AXIS_TDATA_WIDTH-1:0] x;", file=f)
-		# print("\tinput logic [PACKETS_NUM - 1:0] valid;", file=f)
-		# print("\tinput logic last;", file=f)
-		# print("\toutput logic last_out;", file=f)
-		# print("\toutput logic adder_en;", file=f)
-		# print("\tadder_done;", file=f)
-		# print("\targmax")
-		# print("\tinput logic [C_M00_AXIS_TDATA_WIDTH-1:0] packet_counter;", file=f)
-		# print("\toutput logic [C_M00_AXIS_TDATA_WIDTH-1:0] y;", file=f)
-		# OLD VERISON ----------------------------
+        # print("(x, y, packet_counter, valid, s_axis_tready, clk, rst, finish, last, last_out,", file=f)
+        # print("clauses, class_sums, m00_axis_tready, m00_axis_tkeep);", file=f)
+        # print("\tinput logic clk;", file=f)
+        # print("\tinput logic rst;", file=f)
+        # print("\toutput logic finish;", file=f)
+        # print("\toutput logic [CLAUSE_NUM - 1:0] clauses [CLASS_NUM - 1:0];", file=f)
+        # print("\toutput logic signed [WEIGHT_LENGTH - 1:0] class_sums [%d];" %(classes), file=f)
+        # print("\tinput logic s_axis_tready;", file=f)
+        # print("\tinput logic m00_axis_tready;", file=f)
+        # print("\toutput logic [(C_M00_AXIS_TDATA_WIDTH/8)-1 : 0] m00_axis_tkeep;")
+        # print("\tinput logic [C_M00_AXIS_TDATA_WIDTH-1:0] x;", file=f)
+        # print("\tinput logic [PACKETS_NUM - 1:0] valid;", file=f)
+        # print("\tinput logic last;", file=f)
+        # print("\toutput logic last_out;", file=f)
+        # print("\toutput logic adder_en;", file=f)
+        # print("\tadder_done;", file=f)
+        # print("\targmax")
+        # print("\tinput logic [C_M00_AXIS_TDATA_WIDTH-1:0] packet_counter;", file=f)
+        # print("\toutput logic [C_M00_AXIS_TDATA_WIDTH-1:0] y;", file=f)
+        # OLD VERISON ----------------------------
 
-		print("", file=f)
-		for i in range(number_of_blocks):
-			print("\tlogic [CLAUSE_NUM - 1:0] partial_clause_reg_%d;" %(i), file=f)
-			print("\tlogic valid_reg_%d;" %(i), file=f)
-		print("\tlogic valid_reg_%d;" %(number_of_blocks), file=f)
-		
-		print("\tlogic adder;", file=f)
-		print("\tlogic adder_2;", file=f)
-		print("\tlogic argmax;", file=f)
-		print("\tlogic argmax_reset;", file=f)
-		# print("\tlogic finished;", file=f)
-		# print("\tlogic finished_reset;", file=f)
-		print("\tlogic delay_1;", file=f)
-		# print("\tlogic last_registered;", file=f)
-		# print("\tassign finish = finished;")
+        print("", file=f)
+        for i in range(number_of_blocks):
+            print("\tlogic [CLAUSE_NUM - 1:0] partial_clause_reg_%d;" % (i), file=f)
+            print("\tlogic valid_reg_%d;" % (i), file=f)
+        print("\tlogic valid_reg_%d;" % (number_of_blocks), file=f)
 
-		print("\tlogic [CLAUSE_NUM - 1:0] partial_clause_reg [CLASS_NUM - 1:0];", file=f)
-		print("", file=f)
+        print("\tlogic adder;", file=f)
+        print("\tlogic adder_2;", file=f)
+        print("\tlogic argmax;", file=f)
+        print("\tlogic argmax_reset;", file=f)
+        # print("\tlogic finished;", file=f)
+        # print("\tlogic finished_reset;", file=f)
+        print("\tlogic delay_1;", file=f)
+        # print("\tlogic last_registered;", file=f)
+        # print("\tassign finish = finished;")
 
-		print("\tassign clauses = partial_clause_reg;", file=f)
-		print("\tinitial begin", file=f)
-		for i in range(number_of_blocks):
-			print("\t\tvalid_reg_%d = 1'b0;" %(i), file=f)
+        print(
+            "\tlogic [CLAUSE_NUM - 1:0] partial_clause_reg [CLASS_NUM - 1:0];", file=f
+        )
+        print("", file=f)
 
-		print("\t\tvalid_reg_%d = 1'b0;" %(number_of_blocks), file=f)
-		# print("\t\tlast_registered = 1'b0;", file=f)
-		# print("\t\tlast_out = 1'b0;", file=f)
+        print("\tassign clauses = partial_clause_reg;", file=f)
+        print("\tinitial begin", file=f)
+        for i in range(number_of_blocks):
+            print("\t\tvalid_reg_%d = 1'b0;" % (i), file=f)
 
-		print("\t\t(*DONT_TOUCH = \"TRUE\"*) argmax = 1'b0;", file=f)
-		# print("\t\t(*DONT_TOUCH = \"TRUE\"*) adder = 1'b0;", file=f)
-		print("\t\tadder_2 = 1'b0;", file=f)
-		# print("\t\tadder  = 1'b0;", file=f)
-		print("\t\t(*DONT_TOUCH = \"TRUE\"*) delay_1 = 1'b0;", file=f)
-		# print("\t\t(*DONT_TOUCH = \"TRUE\"*) finished = 1'b0;", file=f)
+        print("\t\tvalid_reg_%d = 1'b0;" % (number_of_blocks), file=f)
+        # print("\t\tlast_registered = 1'b0;", file=f)
+        # print("\t\tlast_out = 1'b0;", file=f)
 
-		print("\t\ty = {%d'b0};" %(AXI_data_width), file=f)
-		for i in range(number_of_blocks):
-			print("\t\tpartial_clause_reg_%d = {%d'b0};" %(i, clauses), file=f)
-		# print("\t\tfinished = 0;", file=f)
-		# print("\t\tfinish_reset = 0;", file=f)
-		print("\tend", file=f)
+        print('\t\t(*DONT_TOUCH = "TRUE"*) argmax = 1\'b0;', file=f)
+        # print("\t\t(*DONT_TOUCH = \"TRUE\"*) adder = 1'b0;", file=f)
+        print("\t\tadder_2 = 1'b0;", file=f)
+        # print("\t\tadder  = 1'b0;", file=f)
+        print('\t\t(*DONT_TOUCH = "TRUE"*) delay_1 = 1\'b0;', file=f)
+        # print("\t\t(*DONT_TOUCH = \"TRUE\"*) finished = 1'b0;", file=f)
 
-		print("""
+        print("\t\ty = {%d'b0};" % (AXI_data_width), file=f)
+        for i in range(number_of_blocks):
+            print("\t\tpartial_clause_reg_%d = {%d'b0};" % (i, clauses), file=f)
+        # print("\t\tfinished = 0;", file=f)
+        # print("\t\tfinish_reset = 0;", file=f)
+        print("\tend", file=f)
+
+        print(
+            """
 	HCB_top #(
 		.CLASS_NUM(CLASS_NUM),
 		.PACKETS_NUM(PACKETS_NUM),
@@ -591,7 +634,7 @@ clauses, class_sums, m00_axis_tready, m00_axis_tkeep);
  	)add_inst
  	(
  		.clk(clk),
- 		.clauses(partial_clause_reg),
+ 		.clauses(partial_clause_reg[0]),
  		.class_sums(class_sums),
  		.valid(adder),
  		.adder_done(adder_done)
@@ -616,44 +659,52 @@ clauses, class_sums, m00_axis_tready, m00_axis_tkeep);
 	);
 	
 endmodule
-""", file=f)
-
+""",
+            file=f,
+        )
 
 
 def coalesced_tm_hard_coded_blocks_top(filename, number_of_blocks):
-	with open(filename, "w") as f:
-		print("`timescale 1ns / 1ps", file=f)
-		print("", file=f)
-		print("", file=f)
-		print("module HCB_top #(", file=f)
-		print("\tparameter CLASS_NUM,", file=f)
-		print("\tparameter PACKETS_NUM,", file=f)
-		print("\tparameter CLAUSE_NUM,", file=f)
-		print("\tparameter C_S00_AXIS_TDATA_WIDTH", file=f)
-		print("\t)", file=f)
-		print("\t(", file=f)
-		print("\tinput clk,", file=f)
-		print("\tinput rst,", file=f)
-		print("\tinput [C_S00_AXIS_TDATA_WIDTH - 1:0] x,", file=f)
-		print("\tinput valid,", file=f)
-		print("\tinput HCB_done,", file=f)
-		print("\toutput [CLAUSE_NUM - 1:0] partial_clause [CLASS_NUM]", file=f)
-		print("\t);", file=f)
+    with open(filename, "w") as f:
+        print("`timescale 1ns / 1ps", file=f)
+        print("", file=f)
+        print("", file=f)
+        print("module HCB_top #(", file=f)
+        print("\tparameter CLASS_NUM,", file=f)
+        print("\tparameter PACKETS_NUM,", file=f)
+        print("\tparameter CLAUSE_NUM,", file=f)
+        print("\tparameter C_S00_AXIS_TDATA_WIDTH", file=f)
+        print("\t)", file=f)
+        print("\t(", file=f)
+        print("\tinput clk,", file=f)
+        print("\tinput rst,", file=f)
+        print("\tinput [C_S00_AXIS_TDATA_WIDTH - 1:0] x,", file=f)
+        print("\tinput valid,", file=f)
+        print("\tinput HCB_done,", file=f)
+        print("\toutput [CLAUSE_NUM - 1:0] partial_clause [CLASS_NUM]", file=f)
+        print("\t);", file=f)
 
-		for i in range(number_of_blocks):
-			print("\tlogic [CLAUSE_NUM - 1:0] partial_clause_reg_%d [CLASS_NUM];"%(i), file=f)
+        for i in range(number_of_blocks):
+            print(
+                "\tlogic [CLAUSE_NUM - 1:0] partial_clause_reg_%d [CLASS_NUM];" % (i),
+                file=f,
+            )
 
-		print("\tassign partial_clause = partial_clause_reg_%d;" %(number_of_blocks-1), file=f)
-		print("\tinteger i;", file=f)
+        print(
+            "\tassign partial_clause = partial_clause_reg_%d;" % (number_of_blocks - 1),
+            file=f,
+        )
+        print("\tinteger i;", file=f)
 
-		print("\tinitial begin", file=f)
-		print("\t\tfor (i = 0; i < CLASS_NUM; i = i+1) begin", file=f)
-		for i in range(number_of_blocks):
-			print("\t\t\tpartial_clause_reg_%d[i] = {CLAUSE_NUM{1'b0}};"%(i), file=f)
-		print("\t\tend", file=f)
-		print("\tend", file=f)
-		# print("\tassign partial_clause = partial_clause_reg_%d;"%(i) ,file=f)
-		print("""
+        print("\tinitial begin", file=f)
+        print("\t\tfor (i = 0; i < CLASS_NUM; i = i+1) begin", file=f)
+        for i in range(number_of_blocks):
+            print("\t\t\tpartial_clause_reg_%d[i] = {CLAUSE_NUM{1'b0}};" % (i), file=f)
+        print("\t\tend", file=f)
+        print("\tend", file=f)
+        # print("\tassign partial_clause = partial_clause_reg_%d;"%(i) ,file=f)
+        print(
+            """
 
 	    //shift register
     logic [PACKETS_NUM - 1:0] HT_en;
@@ -683,75 +734,110 @@ def coalesced_tm_hard_coded_blocks_top(filename, number_of_blocks):
     end
     
     assign HT_en_ctrl = HT_en & {PACKETS_NUM{valid}};
-    assign HCB_done = HT_en_ctrl[PACKETS_NUM - 1];\n""", file=f)
+    assign HCB_done = HT_en_ctrl[PACKETS_NUM - 1];\n""",
+            file=f,
+        )
 
-		for i in range(number_of_blocks):
-			print("\tHCB_%d HCB_inst_%d(" %(i, i), file=f)
-			print("\t\t.clk(clk),", file=f)
-			print("\t\t.x(x),", file=f)
-			print("\t\t.valid(HT_en_ctrl[%d]),"%(i), file=f)
-			if(i == 0):
-				print("\t\t.partial_clause(partial_clause_reg_%d)" %(i), file=f)
-			else:
-				print("\t\t.partial_clause_prev(partial_clause_reg_%d),"%(i-1), file=f)
-				print("\t\t.partial_clause(partial_clause_reg_%d)"%(i), file=f)
-			print("\t);", file=f)
-			print("", file=f)
-		print("endmodule", file=f)
+        for i in range(number_of_blocks):
+            print("\tHCB_%d HCB_inst_%d(" % (i, i), file=f)
+            print("\t\t.clk(clk),", file=f)
+            print("\t\t.x(x),", file=f)
+            print("\t\t.valid(HT_en_ctrl[%d])," % (i), file=f)
+            if i == 0:
+                print("\t\t.partial_clause(partial_clause_reg_%d)" % (i), file=f)
+            else:
+                print(
+                    "\t\t.partial_clause_prev(partial_clause_reg_%d)," % (i - 1), file=f
+                )
+                print("\t\t.partial_clause(partial_clause_reg_%d)" % (i), file=f)
+            print("\t);", file=f)
+            print("", file=f)
+        print("endmodule", file=f)
 
-def coalesced_tm_write_hard_coded_blocks(number_of_blocks, TAs, Weights, file_name, bus_width, output_directory, clauses, features):
-    starting_block = 0 
+
+def coalesced_tm_write_hard_coded_blocks(
+    number_of_blocks,
+    TAs,
+    file_name,
+    bus_width,
+    output_directory,
+    classes,
+    clauses,
+    features,
+):
+    starting_block = 0
     # because the data is x and ~x so we can fit both
-    finish_block = bus_width*2
+    finish_block = bus_width * 2
 
     # The raw clause expressions can be written for visual
     clause_expressions = output_directory + "/raw_clause_expressions.txt"
     print(" [RTL_gen][d]    Raw Clause Expressions have been written")
     with open(clause_expressions, "w") as clause_expressions_fp:
         for j in range(clauses):
-            l = " & ".join(["x[%d]" % (k/2) if k %2 == 0 else "~x[%d]" % (int(k/2))
-                        for k in range(features*2) if TAs[j][k] == 1])
+            l = " & ".join(
+                [
+                    "x[%d]" % (k / 2) if k % 2 == 0 else "~x[%d]" % (int(k / 2))
+                    for k in range(features * 2)
+                    if TAs[j][k] == 1
+                ]
+            )
             print("clause %d: %s" % (j, l), file=clause_expressions_fp)
 
-	# we must also deal with clauses that have no includes - these are all exclude clauses 
-	# in the code below we are taking the indexes for these clauses - we will set these as zero.
+    # we must also deal with clauses that have no includes - these are all exclude clauses
+    # in the code below we are taking the indexes for these clauses - we will set these as zero.
     all_exclude_indexes = []
-    all_exc_count = 0	
+    all_exc_count = 0
 
     for j in range(TAs.shape[0]):
-        if(any(v == 1 for v in TAs[j])):
+        if any(v == 1 for v in TAs[j]):
             pass
         else:
             all_exc_count += 1
             all_exclude_indexes.append(j)
     print(" [RTL_gen][d]    No. All Exclude Clauses: ", all_exc_count)
 
-    TAs = TAs.reshape(1, clauses, features*2)
+    TAs = TAs.reshape(1, clauses, features * 2)
 
     with open(file_name, "w") as f:
         for i in range(number_of_blocks):
             TA_slice = []
             for c in range(1):
                 TA_slice.append(TAs[c][:, starting_block:finish_block])
-            if finish_block >= features*2:    
-                lit_range = (features*2 - starting_block)
+            if finish_block >= features * 2:
+                lit_range = features * 2 - starting_block
             else:
-                lit_range = bus_width*2
-            starting_block += bus_width*2
-            if finish_block + bus_width*2 > features*2:    
-                finish_block = starting_block + (features*2 - starting_block)
+                lit_range = bus_width * 2
+            starting_block += bus_width * 2
+            if finish_block + bus_width * 2 > features * 2:
+                finish_block = starting_block + (features * 2 - starting_block)
             else:
-                finish_block += bus_width*2
+                finish_block += bus_width * 2
             if i == 0:
                 print("module HCB_%d (x, partial_clause, clk, valid);" % (i), file=f)
-                print("\toutput\tlogic[%d:0] partial_clause [%d];" % (clauses-1, 0), file=f)
+                print(
+                    "\toutput\tlogic[%d:0] partial_clause [%d:0];"
+                    % (clauses - 1, classes - 1),
+                    file=f,
+                )
             else:
-                print("module HCB_%d (x, partial_clause, partial_clause_prev, clk, valid);" % (i), file=f)
-                print("\tinput\tlogic [%d:0] partial_clause_prev [%d];" % (clauses-1, 0), file=f)
-                print("\toutput\tlogic[%d:0] partial_clause [%d];" % (clauses-1, 0), file=f)
-            
+                print(
+                    "module HCB_%d (x, partial_clause, partial_clause_prev, clk, valid);"
+                    % (i),
+                    file=f,
+                )
+                print(
+                    "\tinput\tlogic [%d:0] partial_clause_prev [%d:0];"
+                    % (clauses - 1, classes - 1),
+                    file=f,
+                )
+                print(
+                    "\toutput\tlogic[%d:0] partial_clause [%d:0];"
+                    % (clauses - 1, classes - 1),
+                    file=f,
+                )
+
             print("\tinput\tlogic clk;", file=f)
-            print("\tinput\tlogic [%d:0] x;" % (bus_width-1), file=f)    
+            print("\tinput\tlogic [%d:0] x;" % (bus_width - 1), file=f)
             print("\tinput\tlogic valid;", file=f)
 
             print("\talways @(posedge clk) begin", file=f)
@@ -760,79 +846,56 @@ def coalesced_tm_write_hard_coded_blocks(number_of_blocks, TAs, Weights, file_na
                 TAs_ = TA_slice[c]
                 print("\t\t\t// Class %d" % (c), file=f)
                 for j in range(clauses):
-                    l = " & ".join(["x[%d]" % (k/2) if k %2 == 0 else "~x[%d]" % (int(k/2))
-                                    for k in range(lit_range) if TAs_[j][k] == 1])
-                    if l == '': 
+                    l = " & ".join(
+                        [
+                            "x[%d]" % (k / 2) if k % 2 == 0 else "~x[%d]" % (int(k / 2))
+                            for k in range(lit_range)
+                            if TAs_[j][k] == 1
+                        ]
+                    )
+                    if l == "":
                         if i != (number_of_blocks):
-                            if i == 0: 
+                            if i == 0:
                                 if j in all_exclude_indexes:
-                                    print("\t\t\tpartial_clause[%d][%d] \t= 1'b0;" % (c, j), file=f)
+                                    print(
+                                        "\t\t\tpartial_clause[%d][%d] \t= 1'b0;"
+                                        % (c, j),
+                                        file=f,
+                                    )
                                 else:
-                                    print("\t\t\tpartial_clause[%d][%d] \t= 1'b1;" % (c, j), file=f)
+                                    print(
+                                        "\t\t\tpartial_clause[%d][%d] \t= 1'b1;"
+                                        % (c, j),
+                                        file=f,
+                                    )
                             else:
-                                print("\t\t\tpartial_clause[%d][%d] \t= partial_clause_prev[%d][%d] & 1'b1;" % (c, j, c, j), file=f)
+                                print(
+                                    "\t\t\tpartial_clause[%d][%d] \t= partial_clause_prev[%d][%d] & 1'b1;"
+                                    % (c, j, c, j),
+                                    file=f,
+                                )
                     else:
                         if i == 0:
-                            print("\t\t\tpartial_clause[%d][%d] \t= %s;" % (c, j, l), file=f)
+                            print(
+                                "\t\t\tpartial_clause[%d][%d] \t= %s;" % (c, j, l),
+                                file=f,
+                            )
                         else:
-                            print("\t\t\tpartial_clause[%d][%d] \t= partial_clause_prev[%d][%d] & %s;" % (c, j, c, j, l), file=f)
+                            print(
+                                "\t\t\tpartial_clause[%d][%d] \t= partial_clause_prev[%d][%d] & %s;"
+                                % (c, j, c, j, l),
+                                file=f,
+                            )
             print("\t\tend", file=f)
             print("\tend", file=f)
             print("endmodule\n\n", file=f)
-        
+
 
 def parse_json(file_path):
-    with open(file_path, 'r') as file:
+    with open(file_path, "r") as file:
         data = json.load(file)
     return data
 
-def train_model(config):
-    # NOTE - I haven't checked the training code thorougly here - this is just a placeholder
-    # Using the standard TMU impl (see utis/tmu/models/classification)
-    print("Training model with config:", config)
-    
-    # Check the configuration
-    config_err = 0
-    checkconfig(config, config_err)
-    if config_err:
-        print("There were errors in the training config json")
-        return
-
-    # Prepare the data
-    data = prep_data(config)
-    
-    # Determine the type of Tsetlin Machine to use
-    if config["TM"] == "Vanilla":
-        tm = TMClassifier(
-            type_iii_feedback=False,
-            number_of_clauses=int(config["Clauses"]),
-            T=int(config["T_value"]),
-            s=float(config["s_value"]),
-            max_included_literals=int(config["max_included_literals"]),
-            weighted_clauses=False,
-            seed=42,
-        )
-    elif config["TM"] == "Coalesced":
-        tm = TMCoalescedClassifier(
-            type_iii_feedback=False,
-            number_of_clauses=int(config["Clauses"]),
-            T=int(config["T_value"]),
-            s=float(config["s_value"]),
-            max_included_literals=int(config["max_included_literals"]),
-            weighted_clauses=True,
-            seed=42,
-        )
-    else:
-        print("Unknown Tsetlin Machine type:", config["TM"])
-        return
-
-    # Train the model
-    for epoch in range(int(config["epochs"])):
-        benchmark_total = BenchmarkTimer(logger=None, text="Epoch Time")
-        with benchmark_total:
-            tm.fit(data["X_train"], data["Y_train"])
-            result = 100 * (tm.predict(data["X_test"]) == data["Y_test"]).mean()
-            print(f"Epoch {epoch+1} Accuracy: {result:.2f}%")
 
 def generate_rtl(config):
     output_directory = config.get("Output_Directory")
@@ -845,17 +908,19 @@ def generate_rtl(config):
     features = int(config.get("Features"))
     test_data = config.get("Test_Data")
 
-    number_of_blocks   	= ceil(features/bus_width)  
+    number_of_blocks = ceil(features / bus_width)
 
-    print(f"Generating RTL with config: Output Directory: {output_directory}, TM: {tm_type}, TAs: {tas}, Weights: {weights}, Classes: {classes}, Clauses: {clauses}, BusWidth: {bus_width}, Features: {features}, Test Data: {test_data}")
+    print(
+        f"Generating RTL with config: Output Directory: {output_directory}, TM: {tm_type}, TAs: {tas}, Weights: {weights}, Classes: {classes}, Clauses: {clauses}, BusWidth: {bus_width}, Features: {features}, Test Data: {test_data}"
+    )
 
-    path = output_directory+"/RTL"
+    path = output_directory + "/RTL"
     isExist = os.path.exists(path)
     if not isExist:
         os.makedirs(path)
     else:
         print("Directory exists")
-    
+
     # Only doing the Coalesced TM for now
     if tm_type == "Coalesced":
         print("	----------------------------------------")
@@ -877,7 +942,7 @@ def generate_rtl(config):
                 TAs[i] = 1
 
         print(" [RTL_gen][d]    Number of Includes: ", np.count_nonzero(TAs))
-        TAs = TAs.reshape(clauses, features*2)
+        TAs = TAs.reshape(clauses, features * 2)
         print(" [RTL_gen][d]    TA new shape: ", TAs.shape)
         print(" [RTL_gen][W]    Incorrect TA profiles produce incorrect hardware ;)")
         print("")
@@ -885,24 +950,42 @@ def generate_rtl(config):
         Weights = np.loadtxt(weights, dtype=int)
         print(" [RTL_gen][d]    Weights of TAs: ", Weights.shape[0])
         # write the hard coded clause block code - this one is for vanilla TM
-        hard_coded_blocks 	= output_directory + "/RTL/TM_Hard_Coded_Clause_Blocks.sv"
-        coalesced_tm_write_hard_coded_blocks(number_of_blocks, TAs, Weights, hard_coded_blocks, bus_width, output_directory, clauses, features)
+        hard_coded_blocks = output_directory + "/RTL/TM_Hard_Coded_Clause_Blocks.sv"
+        coalesced_tm_write_hard_coded_blocks(
+            number_of_blocks,
+            TAs,
+            hard_coded_blocks,
+            bus_width,
+            output_directory,
+            classes,
+            clauses,
+            features,
+        )
 
         # write the hard coded clause block top - this one is for vanilla TM
-        hard_coded_top      = output_directory + "/RTL/HCB_top.sv"
+        hard_coded_top = output_directory + "/RTL/HCB_top.sv"
         coalesced_tm_hard_coded_blocks_top(hard_coded_top, number_of_blocks)
 
-        TM_top      = output_directory + "/RTL/TM_top.sv"
+        TM_top = output_directory + "/RTL/TM_top.sv"
         coalesced_tm_write_top(TM_top, number_of_blocks, bus_width, clauses)
-
-        axis_wrapper_f		= output_directory + "/RTL/axis_wrapper.sv"
-        coalesced_tm_write_axis_wrapper(axis_wrapper_f, bus_width, number_of_blocks, 1, clauses, classes, features)
 
         # write the weights into a hard coded weights file
         bits_required = 0
         bits_required, Weights = get_bits_required(weights, clauses, classes)
 
-        weights_file		= output_directory + "/RTL/hard_coded_weight.sv"
+        axis_wrapper_f = output_directory + "/RTL/axis_wrapper.sv"
+        coalesced_tm_write_axis_wrapper(
+            axis_wrapper_f,
+            bus_width,
+            number_of_blocks,
+            1,
+            bits_required,
+            clauses,
+            classes,
+            features,
+        )
+
+        weights_file = output_directory + "/RTL/hard_coded_weight.sv"
         write_weights(weights_file, Weights, bits_required, classes, clauses)
 
         print("	----------------------------------------")
@@ -912,43 +995,37 @@ def generate_rtl(config):
         print("		    Adjusting templates")
         print("	----------------------------------------")
 
-        os.system("cp utils/RTL_templates/TM_argmax.sv "+ output_directory+"/RTL")
+        os.system("cp utils/RTL_templates/TM_argmax.sv " + output_directory + "/RTL")
         print("	[RTL_gen]	TM_argmax.sv \t\tis added")
 
-        os.system("cp utils/RTL_templates/new_adder.sv "+ output_directory+"/RTL")
+        os.system("cp utils/RTL_templates/new_adder.sv " + output_directory + "/RTL")
         print("	[RTL_gen]	new_adder.sv \t\tis added")
 
-        os.system("cp utils/RTL_templates/AXI_Interface.sv "+ output_directory+"/RTL")
+        os.system(
+            "cp utils/RTL_templates/AXI_Interface.sv " + output_directory + "/RTL"
+        )
         print("	[RTL_gen]	AXI_Interface.sv \tis added")
         print("    ----------------------------------------")
         print("            Testbench generation            ")
         print("    ----------------------------------------")
-        tb  = output_directory + "/RTL/testbench.sv"
+        tb = output_directory + "/RTL/testbench.sv"
         pack_data(test_data, output_directory, bus_width)
         write_testbench(tb, bus_width, number_of_blocks)
-		
 
 
 def synthesize_and_implement(config):
     print("Synthesizing and implementing with config:", config)
 
+
 def deploy(config):
     print("Deploying with config:", config)
 
+
 if __name__ == "__main__":
-    file_path = '/home/tousif/Desktop/MATADOR_09_03_2025/matador/MATADOR_NO_GUI.json'
+    file_path = "/home/bob/Documents/Code/Literal_Labs/matador/coalesced_marge.json"
     data = parse_json(file_path)
-    
+
     flow_control = data.get("Flow Control", {})
-    
-    if flow_control.get("Train_Model") == "Y":
-        train_model(data.get("Model_Training_Config", {}))
-    
+
     if flow_control.get("Generate_RTL") == "Y":
         generate_rtl(data.get("Generate_RTL_Config", {}))
-    
-    if flow_control.get("Synth + Impl") == "Y":
-        synthesize_and_implement(data.get("Generate_RTL_Config", {}))
-    
-    if flow_control.get("Deploy") == "Y":
-        deploy(data.get("Generate_RTL_Config", {}))

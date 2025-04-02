@@ -1,0 +1,5 @@
+ecg_*.txt
+weights.txt
+TAs.txt
+*.zip
+*.pyc
