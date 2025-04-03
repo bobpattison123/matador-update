@@ -636,7 +636,7 @@ clauses, class_sums, m00_axis_tready, m00_axis_tkeep);
  		.clk(clk),
  		.clauses(partial_clause_reg[0]),
  		.class_sums(class_sums),
- 		.valid(adder),
+ 		.valid(adder_en),
  		.adder_done(adder_done)
  	);
     
@@ -680,7 +680,7 @@ def coalesced_tm_hard_coded_blocks_top(filename, number_of_blocks):
         print("\tinput rst,", file=f)
         print("\tinput [C_S00_AXIS_TDATA_WIDTH - 1:0] x,", file=f)
         print("\tinput valid,", file=f)
-        print("\tinput HCB_done,", file=f)
+        print("\toutput HCB_done,", file=f)
         print("\toutput [CLAUSE_NUM - 1:0] partial_clause [CLASS_NUM]", file=f)
         print("\t);", file=f)
 
@@ -713,7 +713,6 @@ def coalesced_tm_hard_coded_blocks_top(filename, number_of_blocks):
     initial begin
         HT_en = '0;
         HT_en[0] = 1'b1;
-        HT_en_ctrl = '0;
     end
     
     always@(posedge clk) begin
