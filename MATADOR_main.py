@@ -681,7 +681,7 @@ def coalesced_tm_hard_coded_blocks_top(filename, number_of_blocks):
         print("\tinput [C_S00_AXIS_TDATA_WIDTH - 1:0] x,", file=f)
         print("\tinput valid,", file=f)
         print("\toutput HCB_done,", file=f)
-        print("\toutput [CLAUSE_NUM - 1:0] partial_clause [CLASS_NUM]", file=f)
+        print("\toutput [CLAUSE_NUM - 1:0] partial_clause [CLASS_NUM - 1:0]", file=f)
         print("\t);", file=f)
 
         for i in range(number_of_blocks):
