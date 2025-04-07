@@ -214,7 +214,6 @@ def to_bin(val, bits):
 
 
 def write_weights(filename, weights, bits_required, classes, clauses):
-    weights = np.transpose(weights)
     print(weights.shape)
     with open(filename, "w") as f:
         # top level module for feeding in the weights and class_sums per class
@@ -230,7 +229,7 @@ def write_weights(filename, weights, bits_required, classes, clauses):
         print("", file=f)
         for i in range(classes):
             for j in range(clauses):
-                # print("weight:", i, j,  weights[i][j])
+                # print(f"weight: class %d, clause %d, value %d" % (i, j, weights[i][j]))
                 print(
                     "\tassign weights[%d][%d] \t=\t%d'b%s;"
                     % (i, j, bits_required, to_bin(weights[i][j], bits_required)),
@@ -239,13 +238,7 @@ def write_weights(filename, weights, bits_required, classes, clauses):
         print("endmodule", file=f)
 
 
-def get_bits_required(Weights_file, classes, clauses):
-    Weights = []
-    with open(Weights_file, "r") as W_file:
-        data = W_file.read()
-        data_into_list = data.split()
-        Weights = [int(i) for i in data_into_list]
-    Weights = np.array(Weights)
+def get_bits_required(Weights, classes, clauses):
     Weights = np.reshape(Weights, (classes, clauses))
     print(Weights.shape)
 
@@ -286,6 +279,8 @@ def get_bits_required(Weights_file, classes, clauses):
     else:
         abs_w = max_neg
         bits = ceil(log(abs_w, 2)) + 1
+
+    bits += 1
 
     print("bits required: ", bits)
     return bits, Weights
@@ -935,10 +930,10 @@ def generate_rtl(config):
         print(" [RTL_gen][d]    Raw Values: ", TAs)
 
         for i in range(TAs.shape[0]):
-            if TAs[i] <= 128:
-                TAs[i] = 0
-            else:
+            if TAs[i] > 127:
                 TAs[i] = 1
+            else:
+                TAs[i] = 0
 
         print(" [RTL_gen][d]    Number of Includes: ", np.count_nonzero(TAs))
         TAs = TAs.reshape(clauses, features * 2)
@@ -970,7 +965,7 @@ def generate_rtl(config):
 
         # write the weights into a hard coded weights file
         bits_required = 0
-        bits_required, Weights = get_bits_required(weights, clauses, classes)
+        bits_required, Weights = get_bits_required(Weights, classes, clauses)
 
         axis_wrapper_f = output_directory + "/RTL/axis_wrapper.sv"
         coalesced_tm_write_axis_wrapper(
