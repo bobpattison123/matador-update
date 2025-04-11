@@ -171,13 +171,14 @@ module Adder_new #(
     initial begin
         adder_done = 0;
     end
-    
+  
+  assign class_sums = class_sums_local;
+
 	always @(posedge clk) begin 
 	   if (rst) begin
 	       adder_done = 0;
 	   end
         if (weight_done == {CLASS_NUM{1'b1}}) begin
-		  class_sums = class_sums_local;
 		  adder_done = 1;
 		end
 		else if (weight_done == {CLASS_NUM{1'b0}}) begin
